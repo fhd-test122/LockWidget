@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">LockWidget</string>
-    <string name="service_name">محرك ويدجت شاشة القفل</string>
-    <string name="accessibility_service_description">خدمة خفيفة لعرض الويدجت المختار على شاشة القفل فقط دون استهلاك للبطارية.</string>
+    <string name="accessibility_service_description">خدمة رسمية خفيفة لعرض الويدجت المختار على شاشة القفل فقط دون استهلاك للبطارية.</string>
 </resources>
