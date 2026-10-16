@@ -16,6 +16,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import org.json.JSONArray
@@ -27,7 +28,8 @@ data class WidgetItem(
     var x: Int,
     var y: Int,
     var width: Int,
-    var height: Int
+    var height: Int,
+    var alpha: Float = 1.0f
 )
 
 class MainActivity : Activity() {
@@ -35,7 +37,14 @@ class MainActivity : Activity() {
     private lateinit var appWidgetManager: AppWidgetManager
     private lateinit var appWidgetHost: AppWidgetHost
     private lateinit var canvasLayout: FrameLayout
+    private lateinit var alphaPanel: LinearLayout
+    private lateinit var alphaSeekBar: SeekBar
+    private lateinit var alphaLabel: TextView
+
     private val widgetList = mutableListOf<WidgetItem>()
+    private val widgetViewsMap = mutableMapOf<Int, View>()
+    private val wrapperViewsMap = mutableMapOf<Int, FrameLayout>()
+    private var selectedWidget: WidgetItem? = null
 
     companion object {
         const val HOST_ID = 2026
@@ -48,7 +57,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // إظهار خلفية الشاشة الحقيقية خلف التطبيق لمحاكاة شاشة القفل
+        // إظهار خلفية شاشة القفل الحقيقية
         window.addFlags(WindowManager.LayoutParams.FLAG_SHOW_WALLPAPER)
         window.statusBarColor = Color.TRANSPARENT
         window.navigationBarColor = Color.TRANSPARENT
@@ -58,7 +67,7 @@ class MainActivity : Activity() {
 
         val rootLayout = FrameLayout(this)
 
-        // 1. طبقة إرشادية شفافة تحاكي ساعة شاشة القفل لتعرف أين تضع الويدجت
+        // 1. طبقة إرشادية لمكان ساعة شاشة القفل
         val lockScreenGuide = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
@@ -80,14 +89,72 @@ class MainActivity : Activity() {
         lockScreenGuide.addView(mockClock)
         rootLayout.addView(lockScreenGuide)
 
-        // 2. مساحة العمل الحرة التي تتحرك فيها الويدجت
+        // 2. مساحة العمل الحرة لتحريك الويدجت
         canvasLayout = FrameLayout(this)
         rootLayout.addView(canvasLayout, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
-        // 3. شريط التحكم السفلي العائم
+        // 3. الحاوية السفلية (تجمع شريط الشفافية + أزرار التحكم)
+        val bottomContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+
+        // شريط التحكم بالشفافية
+        alphaPanel = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            visibility = View.GONE
+            setPadding(dpToPx(16), dpToPx(10), dpToPx(16), dpToPx(10))
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dpToPx(20).toFloat()
+                setColor(Color.parseColor("#D9121212"))
+            }
+        }
+
+        alphaLabel = TextView(this).apply {
+            text = "الشفافية: 100%"
+            textSize = 13f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, dpToPx(12), 0)
+        }
+
+        alphaSeekBar = SeekBar(this).apply {
+            max = 90 // من 10% إلى 100%
+            progress = 90
+            layoutParams = LinearLayout.LayoutParams(dpToPx(180), LinearLayout.LayoutParams.WRAP_CONTENT)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    val actualPercent = progress + 10
+                    val alphaValue = actualPercent / 100f
+                    alphaLabel.text = "الشفافية: $actualPercent%"
+                    selectedWidget?.let { item ->
+                        item.alpha = alphaValue
+                        widgetViewsMap[item.id]?.alpha = alphaValue
+                    }
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    saveWidgetsToPrefs()
+                }
+            })
+        }
+
+        alphaPanel.addView(alphaLabel)
+        alphaPanel.addView(alphaSeekBar)
+
+        val alphaParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            bottomMargin = dpToPx(12)
+        }
+        bottomContainer.addView(alphaPanel, alphaParams)
+
+        // شريط الأزرار السفلي
         val controlBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
@@ -108,15 +175,16 @@ class MainActivity : Activity() {
         controlBar.addView(btnAdd)
         controlBar.addView(btnService)
         controlBar.addView(btnClear)
+        bottomContainer.addView(controlBar)
 
-        val barParams = FrameLayout.LayoutParams(
+        val bottomParams = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT
         ).apply {
             gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-            bottomMargin = dpToPx(32)
+            bottomMargin = dpToPx(28)
         }
-        rootLayout.addView(controlBar, barParams)
+        rootLayout.addView(bottomContainer, bottomParams)
 
         setContentView(rootLayout)
         loadWidgetsFromPrefs()
@@ -133,6 +201,28 @@ class MainActivity : Activity() {
             appWidgetHost.stopListening()
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private fun setSelectedWidget(item: WidgetItem?) {
+        selectedWidget = item
+        for ((id, wrapper) in wrapperViewsMap) {
+            val isSelected = (item?.id == id)
+            wrapper.background = GradientDrawable().apply {
+                shape = GradientDrawable.RECTANGLE
+                cornerRadius = dpToPx(16).toFloat()
+                setColor(Color.parseColor(if (isSelected) "#331E88E5" else "#1AFFFFFF"))
+                setStroke(dpToPx(2), Color.parseColor(if (isSelected) "#FF1E88E5" else "#66FFFFFF"))
+            }
+        }
+
+        if (item != null) {
+            alphaPanel.visibility = View.VISIBLE
+            val percent = (item.alpha * 100).toInt().coerceIn(10, 100)
+            alphaSeekBar.progress = percent - 10
+            alphaLabel.text = "الشفافية: $percent%"
+        } else {
+            alphaPanel.visibility = View.GONE
         }
     }
 
@@ -200,27 +290,24 @@ class MainActivity : Activity() {
         val defaultX = dpToPx(20)
         val defaultY = (displayMetrics.heightPixels / 2) - (defaultH / 2) + (widgetList.size * dpToPx(30))
 
-        val newItem = WidgetItem(widgetId, defaultX, defaultY, defaultW, defaultH)
+        val newItem = WidgetItem(widgetId, defaultX, defaultY, defaultW, defaultH, 1.0f)
         widgetList.add(newItem)
         saveWidgetsToPrefs()
         renderEditableWidget(newItem)
-        Toast.makeText(this, "اسحب الويدجت لتحريكه، أو اسحب الزاوية الزرقاء لتغيير حجمه", Toast.LENGTH_LONG).show()
+        setSelectedWidget(newItem)
+        Toast.makeText(this, "اسحب الويدجت لتحريكه، واستخدم الشريط بالأسفل لتعديل شفافيته", Toast.LENGTH_LONG).show()
     }
 
     private fun renderEditableWidget(item: WidgetItem) {
         val providerInfo = appWidgetManager.getAppWidgetInfo(item.id) ?: return
-        val hostView = appWidgetHost.createView(applicationContext, item.id, providerInfo)
+        val hostView = appWidgetHost.createView(applicationContext, item.id, providerInfo).apply {
+            alpha = item.alpha
+        }
+        widgetViewsMap[item.id] = hostView
         updateWidgetSizeOptions(item)
 
-        // الحاوية القابلة للتحريك وتغيير الحجم
-        val wrapper = FrameLayout(this).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.RECTANGLE
-                cornerRadius = dpToPx(16).toFloat()
-                setColor(Color.parseColor("#22FFFFFF"))
-                setStroke(dpToPx(2), Color.parseColor("#801E88E5"))
-            }
-        }
+        val wrapper = FrameLayout(this)
+        wrapperViewsMap[item.id] = wrapper
 
         val wrapperParams = FrameLayout.LayoutParams(item.width, item.height).apply {
             gravity = Gravity.TOP or Gravity.LEFT
@@ -228,7 +315,6 @@ class MainActivity : Activity() {
             topMargin = item.y
         }
 
-        // إضافة الويدجت داخل الحاوية
         wrapper.addView(hostView, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
             FrameLayout.LayoutParams.MATCH_PARENT
@@ -237,7 +323,6 @@ class MainActivity : Activity() {
             setMargins(pad, pad, pad, pad)
         })
 
-        // طبقة شفافة تلتقط سحب الإصبع لتحريك الويدجت بسهولة دون فتح التطبيق الأصلي بالخطأ أثناء التعديل
         val dragInterceptor = View(this)
         var startX = 0f
         var startY = 0f
@@ -248,6 +333,7 @@ class MainActivity : Activity() {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     wrapper.bringToFront()
+                    setSelectedWidget(item)
                     startX = event.rawX
                     startY = event.rawY
                     initialLeft = wrapperParams.leftMargin
@@ -276,7 +362,7 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams.MATCH_PARENT
         ))
 
-        // زر الحذف الأحمر في الزاوية العلوية اليسرى
+        // زر الحذف الأحمر
         val btnDelete = TextView(this).apply {
             text = "✕"
             textSize = 14f
@@ -289,7 +375,10 @@ class MainActivity : Activity() {
             setOnClickListener {
                 appWidgetHost.deleteAppWidgetId(item.id)
                 widgetList.remove(item)
+                widgetViewsMap.remove(item.id)
+                wrapperViewsMap.remove(item.id)
                 canvasLayout.removeView(wrapper)
+                setSelectedWidget(widgetList.lastOrNull())
                 saveWidgetsToPrefs()
             }
         }
@@ -298,7 +387,7 @@ class MainActivity : Activity() {
             setMargins(dpToPx(4), dpToPx(4), 0, 0)
         })
 
-        // مقبض تغيير الحجم الأزرق في الزاوية السفلية اليمنى
+        // مقبض تغيير الحجم الأزرق
         val resizeHandle = TextView(this).apply {
             text = "⤡"
             textSize = 16f
@@ -319,6 +408,7 @@ class MainActivity : Activity() {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     wrapper.bringToFront()
+                    setSelectedWidget(item)
                     rStartX = event.rawX
                     rStartY = event.rawY
                     initialW = wrapperParams.width
@@ -350,6 +440,7 @@ class MainActivity : Activity() {
         })
 
         canvasLayout.addView(wrapper, wrapperParams)
+        setSelectedWidget(item)
     }
 
     private fun updateWidgetSizeOptions(item: WidgetItem) {
@@ -367,7 +458,10 @@ class MainActivity : Activity() {
 
     private fun loadWidgetsFromPrefs() {
         widgetList.clear()
+        widgetViewsMap.clear()
+        wrapperViewsMap.clear()
         canvasLayout.removeAllViews()
+
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val jsonStr = prefs.getString(KEY_WIDGETS_JSON, "[]") ?: "[]"
 
@@ -380,11 +474,13 @@ class MainActivity : Activity() {
                     x = obj.getInt("x"),
                     y = obj.getInt("y"),
                     width = obj.getInt("width"),
-                    height = obj.getInt("height")
+                    height = obj.getInt("height"),
+                    alpha = obj.optDouble("alpha", 1.0).toFloat()
                 )
                 widgetList.add(item)
                 renderEditableWidget(item)
             }
+            setSelectedWidget(widgetList.lastOrNull())
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -399,6 +495,7 @@ class MainActivity : Activity() {
                 put("y", item.y)
                 put("width", item.width)
                 put("height", item.height)
+                put("alpha", item.alpha.toDouble())
             }
             arr.put(obj)
         }
@@ -413,7 +510,10 @@ class MainActivity : Activity() {
             appWidgetHost.deleteAppWidgetId(item.id)
         }
         widgetList.clear()
+        widgetViewsMap.clear()
+        wrapperViewsMap.clear()
         canvasLayout.removeAllViews()
+        setSelectedWidget(null)
         saveWidgetsToPrefs()
         Toast.makeText(this, "تم مسح جميع الويدجت", Toast.LENGTH_SHORT).show()
     }
