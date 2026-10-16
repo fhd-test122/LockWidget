@@ -83,6 +83,7 @@ class LockWidgetService : AccessibilityService(), SharedPreferences.OnSharedPref
                 val y = obj.getInt("y")
                 val width = obj.getInt("width")
                 val height = obj.getInt("height")
+                val alpha = obj.optDouble("alpha", 1.0).toFloat()
 
                 val providerInfo = appWidgetManager.getAppWidgetInfo(widgetId) ?: continue
 
@@ -98,9 +99,12 @@ class LockWidgetService : AccessibilityService(), SharedPreferences.OnSharedPref
 
                 val container = FrameLayout(this).apply {
                     visibility = View.GONE
+                    this.alpha = alpha // تطبيق درجة الشفافية المختارة
                 }
 
-                val hostView = appWidgetHost.createView(applicationContext, widgetId, providerInfo)
+                val hostView = appWidgetHost.createView(applicationContext, widgetId, providerInfo).apply {
+                    this.alpha = alpha
+                }
                 val pad = (6 * density).toInt()
                 hostView.setPadding(pad, pad, pad, pad)
                 container.addView(hostView, FrameLayout.LayoutParams(
