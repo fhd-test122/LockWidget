@@ -11,11 +11,13 @@ import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Bundle
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.widget.FrameLayout
+import org.json.JSONArray
 
 class LockWidgetService : AccessibilityService(), SharedPreferences.OnSharedPreferenceChangeListener {
 
@@ -25,16 +27,16 @@ class LockWidgetService : AccessibilityService(), SharedPreferences.OnSharedPref
     private lateinit var appWidgetHost: AppWidgetHost
     private lateinit var prefs: SharedPreferences
 
-    private var overlayContainer: FrameLayout? = null
-    private var isOverlayAdded = false
-    private var currentRenderedWidgetId = -1
+    private val activeOverlays = mutableListOf<View>()
+    private var lastRenderedJson = ""
+    private var isListening = false
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON -> evaluateLockState()
-                Intent.ACTION_USER_PRESENT -> hideOverlay()
-                Intent.ACTION_SCREEN_OFF -> hideOverlay()
+                Intent.ACTION_USER_PRESENT -> hideAllOverlays()
+                Intent.ACTION_SCREEN_OFF -> hideAllOverlays()
             }
         }
     }
@@ -60,92 +62,130 @@ class LockWidgetService : AccessibilityService(), SharedPreferences.OnSharedPref
             registerReceiver(screenReceiver, filter)
         }
 
-        createOverlayContainer()
+        rebuildOverlays()
         evaluateLockState()
     }
 
-    private fun createOverlayContainer() {
-        if (isOverlayAdded) return
+    private fun rebuildOverlays() {
+        removeAllOverlaysFromWindow()
 
-        overlayContainer = FrameLayout(this).apply {
-            visibility = View.GONE
-        }
-
-        val density = resources.displayMetrics.density
-        val widgetHeightPx = (220 * density).toInt() // ارتفاع متناسق يناسب أغلب الويدجت الرسمية
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            widgetHeightPx,
-            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.CENTER // يظهر في منتصف شاشة القفل تماماً
-        }
+        val jsonStr = prefs.getString(MainActivity.KEY_WIDGETS_JSON, "[]") ?: "[]"
+        lastRenderedJson = jsonStr
 
         try {
-            windowManager.addView(overlayContainer, params)
-            isOverlayAdded = true
-            renderWidgetView()
+            val arr = JSONArray(jsonStr)
+            val density = resources.displayMetrics.density
+
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val widgetId = obj.getInt("id")
+                val x = obj.getInt("x")
+                val y = obj.getInt("y")
+                val width = obj.getInt("width")
+                val height = obj.getInt("height")
+
+                val providerInfo = appWidgetManager.getAppWidgetInfo(widgetId) ?: continue
+
+                val wDp = (width / density).toInt()
+                val hDp = (height / density).toInt()
+                val options = Bundle().apply {
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, wDp)
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, wDp)
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, hDp)
+                    putInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, hDp)
+                }
+                appWidgetManager.updateAppWidgetOptions(widgetId, options)
+
+                val container = FrameLayout(this).apply {
+                    visibility = View.GONE
+                }
+
+                val hostView = appWidgetHost.createView(applicationContext, widgetId, providerInfo)
+                val pad = (6 * density).toInt()
+                hostView.setPadding(pad, pad, pad, pad)
+                container.addView(hostView, FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                ))
+
+                val params = WindowManager.LayoutParams(
+                    width,
+                    height,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
+                    PixelFormat.TRANSLUCENT
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.LEFT
+                    this.x = x
+                    this.y = y
+                }
+
+                windowManager.addView(container, params)
+                activeOverlays.add(container)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    private fun renderWidgetView() {
-        val savedWidgetId = prefs.getInt(MainActivity.KEY_WIDGET_ID, -1)
-        overlayContainer?.removeAllViews()
-        currentRenderedWidgetId = savedWidgetId
+    private fun evaluateLockState() {
+        val currentJson = prefs.getString(MainActivity.KEY_WIDGETS_JSON, "[]") ?: "[]"
+        if (currentJson != lastRenderedJson) {
+            rebuildOverlays()
+        }
 
-        if (savedWidgetId != -1) {
-            val providerInfo = appWidgetManager.getAppWidgetInfo(savedWidgetId)
-            if (providerInfo != null) {
+        if (keyguardManager.isKeyguardLocked && activeOverlays.isNotEmpty()) {
+            if (!isListening) {
                 try {
-                    val hostView = appWidgetHost.createView(applicationContext, savedWidgetId, providerInfo)
-                    val density = resources.displayMetrics.density
-                    val padding = (16 * density).toInt()
-                    hostView.setPadding(padding, padding, padding, padding)
-                    overlayContainer?.addView(hostView)
+                    appWidgetHost.startListening()
+                    isListening = true
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
             }
-        }
-    }
-
-    private fun evaluateLockState() {
-        val savedWidgetId = prefs.getInt(MainActivity.KEY_WIDGET_ID, -1)
-        if (keyguardManager.isKeyguardLocked && savedWidgetId != -1) {
-            if (currentRenderedWidgetId != savedWidgetId || overlayContainer?.childCount == 0) {
-                renderWidgetView()
-            }
-            if (overlayContainer?.visibility != View.VISIBLE) {
-                appWidgetHost.startListening()
-                overlayContainer?.visibility = View.VISIBLE
+            for (view in activeOverlays) {
+                if (view.visibility != View.VISIBLE) {
+                    view.visibility = View.VISIBLE
+                }
             }
         } else {
-            hideOverlay()
+            hideAllOverlays()
         }
     }
 
-    private fun hideOverlay() {
-        if (overlayContainer?.visibility == View.VISIBLE) {
-            overlayContainer?.visibility = View.GONE
+    private fun hideAllOverlays() {
+        for (view in activeOverlays) {
+            if (view.visibility == View.VISIBLE) {
+                view.visibility = View.GONE
+            }
+        }
+        if (isListening) {
             try {
                 appWidgetHost.stopListening()
+                isListening = false
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
     }
 
+    private fun removeAllOverlaysFromWindow() {
+        for (view in activeOverlays) {
+            try {
+                windowManager.removeView(view)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        activeOverlays.clear()
+    }
+
     override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
-        if (key == MainActivity.KEY_WIDGET_ID) {
-            renderWidgetView()
+        if (key == MainActivity.KEY_WIDGETS_JSON) {
+            rebuildOverlays()
             evaluateLockState()
         }
     }
@@ -157,7 +197,7 @@ class LockWidgetService : AccessibilityService(), SharedPreferences.OnSharedPref
     }
 
     override fun onInterrupt() {
-        hideOverlay()
+        hideAllOverlays()
     }
 
     override fun onDestroy() {
@@ -165,13 +205,10 @@ class LockWidgetService : AccessibilityService(), SharedPreferences.OnSharedPref
         prefs.unregisterOnSharedPreferenceChangeListener(this)
         try {
             unregisterReceiver(screenReceiver)
-            appWidgetHost.stopListening()
+            if (isListening) appWidgetHost.stopListening()
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        if (isOverlayAdded && overlayContainer != null) {
-            windowManager.removeView(overlayContainer)
-            isOverlayAdded = false
-        }
+        removeAllOverlaysFromWindow()
     }
 }
